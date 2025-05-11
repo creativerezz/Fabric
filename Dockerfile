@@ -22,20 +22,22 @@ FROM alpine:latest
 # Copy the binary from builder
 COPY --from=builder /app/fabric /fabric
 
-# Copy patterns directory
-COPY patterns /patterns
+# Copy patterns directory into the Fabric config folder
+# This ensures patterns are available in the expected DB location
+RUN mkdir -p /root/.config/fabric/patterns
+COPY patterns /root/.config/fabric/patterns
 
-# Ensure clean config directory and copy ENV file
+# Reset config directory (keeps it empty for environment-based config)
 RUN rm -rf /root/.config/fabric && \
     mkdir -p /root/.config/fabric
-COPY ENV /root/.config/fabric/.env
+# The application will load configuration from environment variables; a .env file is optional
 
 # Add debug commands
 RUN ls -la /root/.config/fabric/
 
-# Expose port 8080
+## Port exposure and startup configured via PORT environment variable below
+# Expose port and configure runtime to bind on the PORT environment variable
+ENV PORT=8080
 EXPOSE 8080
-
-# Run the binary with debug output
-ENTRYPOINT ["/fabric"]
-CMD ["--serve"] 
+# Run the Fabric REST API, binding to $PORT at runtime (default 8080)
+ENTRYPOINT ["sh", "-c", "/fabric --serve --address :${PORT:-8080}"]

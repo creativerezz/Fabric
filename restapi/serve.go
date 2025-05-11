@@ -22,6 +22,9 @@ func Serve(registry *core.PluginRegistry, address string, apiKey string) (err er
 
 	// Register routes
 	fabricDb := registry.Db
+
+	// Register most handlers directly on the root engine 'r'
+	// These will have paths like /patterns, /chat, etc.
 	NewPatternsHandler(r, fabricDb.Patterns)
 	NewContextsHandler(r, fabricDb.Contexts)
 	NewSessionsHandler(r, fabricDb.Sessions)
@@ -29,6 +32,13 @@ func Serve(registry *core.PluginRegistry, address string, apiKey string) (err er
 	NewConfigHandler(r, fabricDb)
 	NewModelsHandler(r, registry.VendorManager)
 	NewStrategiesHandler(r)
+
+	// Create a specific group for /api and register YouTubeHandler there
+	// This makes YouTube endpoints available at /api/youtube
+	apiGroup := r.Group("/api")
+	{
+		NewYouTubeHandler(apiGroup, registry, fabricDb)
+	}
 
 	// Start server
 	err = r.Run(address)

@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"net/http" // Added for custom HTTP client
+	"io/ioutil" // Added for reading response body
 
 	"github.com/anaskhan96/soup"
 	"github.com/danielmiessler/fabric/plugins"
@@ -154,16 +156,50 @@ func formatTimestamp(seconds float64) string {
 
 func (o *YouTube) GrabTranscriptBase(videoId string, language string) (ret string, err error) {
 	if err = o.initService(); err != nil {
-		return
+		return "", fmt.Errorf("error initializing YouTube service: %v", err)
 	}
 
 	watchUrl := "https://www.youtube.com/watch?v=" + videoId
-	var resp string
-	if resp, err = soup.Get(watchUrl); err != nil {
-		return
+	var pageContent string // Changed from resp to pageContent for clarity
+
+	// Create a new HTTP client
+	client := &http.Client{
+		Timeout: 10 * time.Second, // Optional: set a timeout
 	}
 
-	doc := soup.HTMLParse(resp)
+	// Create a new GET request
+	req, err := http.NewRequest("GET", watchUrl, nil)
+	if err != nil {
+		err = fmt.Errorf("error creating request: %v", err)
+		return "", err // Ensure err is returned correctly
+	}
+
+	// Set a common browser User-Agent header
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9") // Also good to set accept language
+
+	// Execute the request
+	httpResp, err := client.Do(req)
+	if err != nil {
+		err = fmt.Errorf("error fetching YouTube page: %v", err)
+		return "", err // Ensure err is returned correctly
+	}
+	defer httpResp.Body.Close()
+
+	if httpResp.StatusCode != http.StatusOK {
+		err = fmt.Errorf("error fetching YouTube page: status code %d", httpResp.StatusCode)
+		return "", err // Ensure err is returned correctly
+	}
+
+	// Read the response body
+	body, err := ioutil.ReadAll(httpResp.Body)
+	if err != nil {
+		err = fmt.Errorf("error reading response body: %v", err)
+		return "", err // Ensure err is returned correctly
+	}
+	pageContent = string(body)
+
+	doc := soup.HTMLParse(pageContent)
 	scriptTags := doc.FindAll("script")
 	for _, scriptTag := range scriptTags {
 		if strings.Contains(scriptTag.Text(), "captionTracks") {
@@ -175,29 +211,67 @@ func (o *YouTube) GrabTranscriptBase(videoId string, language string) (ret strin
 				}
 
 				if err = json.Unmarshal([]byte(match[1]), &captionTracks); err != nil {
-					return
+					return "", fmt.Errorf("error unmarshalling captionTracks: %v", err)
 				}
 
 				if len(captionTracks) > 0 {
-					transcriptURL := captionTracks[0].BaseURL
+					var finalTranscriptURL string
+					// Find the best matching language URL
+					foundLangMatch := false
 					for _, captionTrack := range captionTracks {
-						parsedUrl, error := url.Parse(captionTrack.BaseURL)
-						if error != nil {
-							err = fmt.Errorf("error parsing caption track")
+						parsedUrl, parseErr := url.Parse(captionTrack.BaseURL)
+						if parseErr != nil {
+							log.Printf("Warning: error parsing caption track URL %s: %v", captionTrack.BaseURL, parseErr)
+							continue // Skip this track
 						}
 						parsedUrlParams, _ := url.ParseQuery(parsedUrl.RawQuery)
-						if parsedUrlParams["lang"][0] == language {
-							transcriptURL = captionTrack.BaseURL
+						if langParam, ok := parsedUrlParams["lang"]; ok && len(langParam) > 0 && langParam[0] == language {
+							finalTranscriptURL = captionTrack.BaseURL
+							foundLangMatch = true
+							break
 						}
 					}
-					ret, err = soup.Get(transcriptURL)
-					return
+
+					// If no specific language match, use the first available URL as a fallback
+					if !foundLangMatch && len(captionTracks) > 0 {
+						finalTranscriptURL = captionTracks[0].BaseURL
+						log.Printf("Warning: no exact language match for '%s', falling back to first available: %s", language, finalTranscriptURL)
+					}
+					
+					if finalTranscriptURL == "" {
+						return "", fmt.Errorf("no suitable transcript URL found after parsing captionTracks")
+					}
+
+					// Fetch the transcript content using the custom client
+					// (Re-using client defined earlier for the watch page)
+					transcriptReq, reqErr := http.NewRequest("GET", finalTranscriptURL, nil)
+					if reqErr != nil {
+						return "", fmt.Errorf("error creating transcript request for %s: %v", finalTranscriptURL, reqErr)
+					}
+					// User-Agent might be less critical here, but can be set for consistency if desired
+					// transcriptReq.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+					// transcriptReq.Header.Set("Accept-Language", "en-US,en;q=0.9")
+
+					transcriptHttpResp, doErr := client.Do(transcriptReq)
+					if doErr != nil {
+						return "", fmt.Errorf("error fetching transcript from %s: %v", finalTranscriptURL, doErr)
+					}
+					defer transcriptHttpResp.Body.Close()
+
+					if transcriptHttpResp.StatusCode != http.StatusOK {
+						return "", fmt.Errorf("error fetching transcript from %s: status code %d", finalTranscriptURL, transcriptHttpResp.StatusCode)
+					}
+
+					transcriptBody, readErr := ioutil.ReadAll(transcriptHttpResp.Body)
+					if readErr != nil {
+						return "", fmt.Errorf("error reading transcript body from %s: %v", finalTranscriptURL, readErr)
+					}
+					return string(transcriptBody), nil // Successfully fetched transcript
 				}
 			}
 		}
 	}
-	err = fmt.Errorf("transcript not found")
-	return
+	return "", fmt.Errorf("transcript not found in watch page HTML") // More specific error
 }
 
 func (o *YouTube) GrabComments(videoId string) (ret []string, err error) {
